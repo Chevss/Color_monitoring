@@ -164,9 +164,9 @@ def select_colors():
                 if not drawing and circle_radius > 0:
                     avg_color = get_color_from_roi(frame, circle_center, circle_radius)
                     if avg_color is not None:
-                        # Increase sensitivity by narrowing the HSV bounds
-                        lower = tuple(np.maximum(avg_color - [3, 20, 20], [0, 0, 0]).astype(int))
-                        upper = tuple(np.minimum(avg_color + [3, 20, 20], [179, 255, 255]).astype(int))
+                        # Further increase sensitivity by narrowing the HSV bounds
+                        lower = tuple(np.maximum(avg_color - [1, 10, 10], [0, 0, 0]).astype(int))
+                        upper = tuple(np.minimum(avg_color + [1, 10, 10], [179, 255, 255]).astype(int))
                         print(f"Detected color range in HSV: Lower={lower}, Upper={upper}")  # Display the range
                         color_name = input("Enter name for the new color: ")
                         selected_colors.append((lower, upper, color_name))
