@@ -132,17 +132,28 @@ def select_image():
     root.destroy()
     return file_path
 
-def select_colors(image):
+def select_colors(image, existing_calibrator=None):
     global current_circle
-    calibrator = ColorCalibrator()
     
-    # Add predefined colors to the calibrator
-    for color_name, (lower, upper) in predefined_colors.items():
-        calibrator.calibrate_color(lower, upper, color_name)
+    # Initialize calibrator - either use existing one or create a new one
+    calibrator = existing_calibrator if existing_calibrator else ColorCalibrator()
+    
+    # If using a new calibrator, add predefined colors
+    if not existing_calibrator:
+        # Add predefined colors to the calibrator
+        for color_name, (lower, upper) in predefined_colors.items():
+            calibrator.calibrate_color(lower, upper, color_name)
     
     print("Select at least one color from the following list:")
     for i, color in enumerate(predefined_colors.keys()):
         print(f"{i}: {color}")
+    
+    # Show existing calibrated colors if any
+    calibrated_colors = calibrator.get_colors()
+    if calibrated_colors:
+        print("\nCurrently selected colors:")
+        for color_name in calibrated_colors:
+            print(f"- {color_name}")
     
     selected_colors = []
     while True:
@@ -151,6 +162,7 @@ def select_colors(image):
             color_name = list(predefined_colors.keys())[int(choice)]
             lower, upper = predefined_colors[color_name]
             selected_colors.append((lower, upper, color_name))
+            print(f"Added {color_name} to detection list")
         elif choice == 'c':
             print("Draw a circle around the color to calibrate.")
             current_circle = {"center": (0, 0), "radius": 0}  # Reset circle
@@ -177,8 +189,8 @@ def select_colors(image):
                     avg_color = get_color_from_roi(image, current_circle["center"], current_circle["radius"])
                     if avg_color is not None and not np.isnan(avg_color).any():
                         # Create HSV bounds for the new color with wider ranges for better detection
-                        lower = tuple(np.maximum(avg_color - [10, 50, 50], [0, 0, 0]).astype(int))
-                        upper = tuple(np.minimum(avg_color + [10, 50, 50], [179, 255, 255]).astype(int))
+                        lower = tuple(np.maximum(avg_color - [8, 25, 25], [0, 0, 0]).astype(int))
+                        upper = tuple(np.minimum(avg_color + [8, 25, 25], [179, 255, 255]).astype(int))
                         print(f"Detected HSV color: {avg_color}")
                         print(f"Using HSV range: Lower={lower}, Upper={upper}")
                         color_name = input("Enter name for the new color: ")
@@ -388,7 +400,7 @@ def main():
     # Resize the image
     original_image = cv2.resize(original_image, (IMAGE_WIDTH, IMAGE_HEIGHT))
     
-    # Get colors to detect
+    # Get initial colors to detect
     colors_to_detect, color_calibrator = select_colors(original_image.copy())
     
     # Initialize color detector with the calibrator
@@ -432,10 +444,12 @@ def main():
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
             cv2.putText(display_image, "Press 'Enter' to analyze, 'c' to clear all circles, 'n' for new image, 'q' to quit", 
                         (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            cv2.putText(display_image, "Press 's' to select different colors", (10, 90), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         else:
             cv2.putText(display_image, "Press 'r' to reset and draw new circles, 'n' for new image", (10, 30), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            cv2.putText(display_image, "Press 'q' to quit", (10, 60), 
+            cv2.putText(display_image, "Press 's' to select different colors, 'q' to quit", (10, 60), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
         
         # Display the image
@@ -459,6 +473,16 @@ def main():
                 original_image = new_image
                 show_results = False
                 print("New image loaded successfully.")
+        elif key == ord('s'):
+            # Go back to color selection
+            print("\nReselecting colors to detect...")
+            # Pass the existing calibrator to maintain custom colors
+            colors_to_detect, color_calibrator = select_colors(original_image.copy(), color_calibrator)
+            # Reset circles and results when colors change
+            detection_circles = []
+            current_circle = {"center": (0, 0), "radius": 0}
+            show_results = False
+            print("Colors updated successfully. Draw new detection circles.")
         elif key == 13:  # Enter key
             if detection_circles:
                 show_results = True
