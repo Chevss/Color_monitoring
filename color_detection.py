@@ -5,13 +5,39 @@ from collections import deque
 import time
 from ultralytics import YOLO
 import torch
-from color_calibration import ColorCalibrator
 
 # Set dark mode style for the plot
 plt.style.use('dark_background')
 
 # Video Parameters
 FRAME_WIDTH, FRAME_HEIGHT = 1280, 720
+
+# Create ColorCalibrator class
+class ColorCalibrator:
+    def __init__(self):
+        self.calibrated_colors = {}
+    
+    def calibrate_color(self, hsv_lower, hsv_upper, color_name):
+        """Add a new calibrated color to the dictionary"""
+        self.calibrated_colors[color_name] = (hsv_lower, hsv_upper)
+        return True
+    
+    def get_colors(self):
+        """Return all calibrated colors"""
+        return self.calibrated_colors
+
+class ColorDetector:
+    def __init__(self, calibrator=None):
+        self.calibrator = calibrator if calibrator else ColorCalibrator()
+
+    def detect_color(self, hsv_value):
+        """Detect if the HSV value matches any calibrated color."""
+        calibrated_colors = self.calibrator.get_colors()
+        for name, (lower, upper) in calibrated_colors.items():
+            # Check if the HSV value is within the range
+            if all(lower[i] <= hsv_value[i] <= upper[i] for i in range(3)):
+                return name
+        return None
 
 def initialize_camera(camera_choice):
     if camera_choice == 0:
@@ -77,9 +103,15 @@ lines_static = {}
 
 ax1.set_xlim(0, 100)
 ax1.set_ylim(0, 1)  # Set y-axis limit to 0.5 for normalized values
-ax2.legend(loc='upper right')
+ax1.set_title('Live Color Detection')
+ax1.set_xlabel('Time')
+ax1.set_ylabel('Normalized Color Count')
+
 ax2.set_xlim(0, 100)
 ax2.set_ylim(0, 1)  # Set y-axis limit to 0.5 for normalized values
+ax2.set_title('Static Color Detection (Max Values)')
+ax2.set_xlabel('Time Interval (5s)')
+ax2.set_ylabel('Max Normalized Color Count')
 
 last_alert_times = {}
 last_static_update_time = time.time()
@@ -136,45 +168,72 @@ def get_color_from_roi(frame, center, radius):
     cv2.circle(mask, center, radius, 255, -1)
     circular_roi = cv2.bitwise_and(frame, frame, mask=mask)
     hsv_roi = cv2.cvtColor(circular_roi, cv2.COLOR_BGR2HSV)
-    avg_color = np.mean(hsv_roi[hsv_roi > 0].reshape(-1, 3), axis=0)  # Calculate the average HSV color
-    return avg_color
+    
+    # Only consider non-zero pixels (inside the circle)
+    non_zero_pixels = hsv_roi[mask > 0]
+    if len(non_zero_pixels) > 0:
+        avg_color = np.mean(non_zero_pixels, axis=0)
+        return avg_color
+    return None
 
 def select_colors():
-    global circle_center, circle_radius  # Ensure these variables are accessible and modifiable
+    global circle_center, circle_radius
+    calibrator = ColorCalibrator()
+    
+    # Add predefined colors to the calibrator
+    for color_name, (lower, upper) in predefined_colors.items():
+        calibrator.calibrate_color(lower, upper, color_name)
+    
     print("Select at least one color from the following list:")
     for i, color in enumerate(predefined_colors.keys()):
         print(f"{i}: {color}")
+    
     selected_colors = []
     while True:
         choice = input("Enter the number of the color to select (or 'c' to calibrate a new color, 'x' to finish): ")
         if choice.isdigit() and int(choice) in range(len(predefined_colors)):
             color_name = list(predefined_colors.keys())[int(choice)]
-            selected_colors.append((predefined_colors[color_name][0], predefined_colors[color_name][1], color_name))
+            lower, upper = predefined_colors[color_name]
+            selected_colors.append((lower, upper, color_name))
         elif choice == 'c':
             print("Draw a circle around the color to calibrate.")
+            circle_center, circle_radius = (0, 0), 0  # Reset circle
             while True:
                 ret, frame = cap.read()
                 if not ret:
                     continue
                 frame = cv2.resize(frame, (FRAME_WIDTH, FRAME_HEIGHT))
-                temp_frame = frame.copy()  # Create a copy to avoid permanent drawing
+                temp_frame = frame.copy()
                 if drawing or circle_radius > 0:
                     cv2.circle(temp_frame, circle_center, circle_radius, (0, 255, 0), 2)
                 cv2.imshow('Frame', temp_frame)
                 if not drawing and circle_radius > 0:
                     avg_color = get_color_from_roi(frame, circle_center, circle_radius)
-                    if avg_color is not None:
-                        # Further increase sensitivity by narrowing the HSV bounds
-                        lower = tuple(np.maximum(avg_color - [1, 10, 10], [0, 0, 0]).astype(int))
-                        upper = tuple(np.minimum(avg_color + [1, 10, 10], [179, 255, 255]).astype(int))
-                        print(f"Detected color range in HSV: Lower={lower}, Upper={upper}")  # Display the range
+                    if avg_color is not None and not np.isnan(avg_color).any():
+                        # Create HSV bounds for the new color with wider ranges for better detection
+                        lower = tuple(np.maximum(avg_color - [10, 50, 50], [0, 0, 0]).astype(int))
+                        upper = tuple(np.minimum(avg_color + [10, 50, 50], [179, 255, 255]).astype(int))
+                        print(f"Detected HSV color: {avg_color}")
+                        print(f"Using HSV range: Lower={lower}, Upper={upper}")
                         color_name = input("Enter name for the new color: ")
+                        
+                        # Add to calibrator
+                        calibrator.calibrate_color(lower, upper, color_name)
+                        
+                        # Add to selected colors
                         selected_colors.append((lower, upper, color_name))
-                        circle_center, circle_radius = (0, 0), 0  # Reset the circle coordinates
+                        
+                        # Also update the predefined_colors dictionary for future reference
+                        predefined_colors[color_name] = (lower, upper)
+                        
+                        # Reset the circle
+                        circle_center, circle_radius = (0, 0), 0
                         break
                     else:
-                        print("Invalid ROI. Please try again.")
-                if cv2.waitKey(1) & 0xFF == ord('q'):
+                        print("Invalid ROI or no color detected. Please try again.")
+                        circle_center, circle_radius = (0, 0), 0  # Reset circle
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
                     break
         elif choice == 'x':
             if len(selected_colors) >= 1:
@@ -183,15 +242,44 @@ def select_colors():
                 print("You must select at least one color.")
         else:
             print("Invalid choice. Please try again.")
-    return selected_colors
+    return selected_colors, calibrator
 
-colors_to_detect = select_colors()
+def track_color_transitions(hsv_frame, center, radius, colors_to_detect, color_detector):
+    global color_transitions
+    mask = np.zeros(hsv_frame.shape[:2], dtype=np.uint8)
+    cv2.circle(mask, center, radius, 255, -1)
+    circular_roi = cv2.bitwise_and(hsv_frame, hsv_frame, mask=mask)
+    area = np.pi * radius ** 2
+    
+    # Track each color
+    for color in colors_to_detect:
+        lower, upper, color_name = color
+        mask = cv2.inRange(circular_roi, np.array(lower), np.array(upper))
+        color_count = cv2.countNonZero(mask)
+        normalized_count = min(color_count / area, 1.0)
+        
+        # Make sure the color exists in the transitions dictionary
+        if color_name not in color_transitions:
+            color_transitions[color_name] = deque(maxlen=100)
+        
+        color_transitions[color_name].append(normalized_count)
+
+# Get colors to detect and calibrator
+colors_to_detect, color_calibrator = select_colors()
+
+# Initialize color detector with the calibrator
+color_detector = ColorDetector(color_calibrator)
+
+# Set up the plots
 for color in colors_to_detect:
     color_counts[color] = deque(maxlen=100)
     static_counts[color] = []
-    lines_live[color] = ax1.plot([], [], label=color[2], color=color[2])[0]
-    lines_static[color] = ax2.plot([], [], label=color[2], color=color[2])[0]
+    color_name = color[2]
+    lines_live[color] = ax1.plot([], [], label=color_name, color=color_name.lower() if color_name.lower() in ['red', 'green', 'blue', 'yellow', 'orange', 'purple', 'brown'] else 'white')[0]
+    lines_static[color] = ax2.plot([], [], label=color_name, color=color_name.lower() if color_name.lower() in ['red', 'green', 'blue', 'yellow', 'orange', 'purple', 'brown'] else 'white')[0]
     last_alert_times[color] = time.time()
+
+ax1.legend(loc='upper right')
 ax2.legend(loc='upper right')
 
 print("Draw a circle around the area where colors will be detected.")
@@ -210,45 +298,11 @@ while True:
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
-def track_color_transitions(hsv_frame, center, radius, colors_to_detect):
-    global color_transitions  # Ensure we modify the global dictionary
-    mask = np.zeros(hsv_frame.shape[:2], dtype=np.uint8)
-    cv2.circle(mask, center, radius, 255, -1)
-    circular_roi = cv2.bitwise_and(hsv_frame, hsv_frame, mask=mask)
-    area = np.pi * radius ** 2  # Calculate the area of the circular ROI
-    for color in colors_to_detect:
-        lower, upper, color_name = color
-        # Dynamically add missing colors to color_transitions
-        if color_name not in color_transitions:
-            color_transitions[color_name] = deque(maxlen=100)
-        mask = cv2.inRange(circular_roi, np.array(lower), np.array(upper))
-        color_count = cv2.countNonZero(mask)
-        normalized_count = min(color_count / area, 1.0)  # Normalize the count to a range of 0.0 to 1.0
-        color_transitions[color_name].append(normalized_count)
-
-# Ensure dynamically added colors are initialized in color_transitions
+# Ensure all colors are in the transitions dictionary
 for color in colors_to_detect:
     _, _, color_name = color
     if color_name not in color_transitions:
         color_transitions[color_name] = deque(maxlen=100)
-
-class ColorDetector:
-    def __init__(self):
-        self.calibrator = ColorCalibrator()
-
-    def detect_color(self, rgb_values):
-        """Detect the closest calibrated color."""
-        calibrated_colors = self.calibrator.get_colors()
-        closest_color = None
-        min_distance = float('inf')
-
-        for name, color in calibrated_colors.items():
-            distance = sum((rgb_values[i] - color[i]) ** 2 for i in range(3)) ** 0.5
-            if distance < min_distance:
-                min_distance = distance
-                closest_color = name
-
-        return closest_color
 
 # Main loop to detect colors
 while True:
@@ -261,27 +315,43 @@ while True:
 
     hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
-    track_color_transitions(hsv_frame, detection_circle_center, detection_circle_radius, colors_to_detect)
+    # Track color transitions using the color detector
+    track_color_transitions(hsv_frame, detection_circle_center, detection_circle_radius, colors_to_detect, color_detector)
 
     alerts = []
     current_time = time.time()
-    area = np.pi * detection_circle_radius ** 2  # Calculate the area of the circular ROI
+    area = np.pi * detection_circle_radius ** 2
+    
+    # Create a mask for the detection circle
+    detection_mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+    cv2.circle(detection_mask, detection_circle_center, detection_circle_radius, 255, -1)
+    
+    # Process each color
     for color in colors_to_detect:
         lower, upper, color_name = color
         mask = cv2.inRange(hsv_frame, np.array(lower), np.array(upper))
+        
+        # Apply the detection circle mask
+        mask = cv2.bitwise_and(mask, mask, mask=detection_mask)
+        
         color_count = cv2.countNonZero(mask)
-        normalized_count = min(color_count / area, 1.0)  # Normalize the count to a range of 0.0 to 1.0
+        normalized_count = min(color_count / area, 1.0)
 
         # Append the normalized count to the deque
         color_counts[color].append(normalized_count)
 
         # Check if the normalized count exceeds a threshold
-        if normalized_count > 0.1:
+        if normalized_count >= 0:
             alerts.append(f"{color_name}: {normalized_count:.2f}")
 
         # Update live plot data
         lines_live[color].set_xdata(range(len(color_counts[color])))
         lines_live[color].set_ydata(color_counts[color])
+        
+        # Visualize the detected color in the frame
+        color_display = frame.copy()
+        color_display[mask > 0] = [255, 255, 255]  # Highlight detected pixels
+        cv2.addWeighted(color_display, 0.3, frame, 0.7, 0, frame)
 
     if alerts:
         print(f"Detected: {', '.join(alerts)}")
@@ -306,6 +376,12 @@ while True:
     if detection_circle_radius > 0:
         cv2.circle(frame, detection_circle_center, detection_circle_radius, (0, 255, 0), 2)
 
+    # Add text showing the detected colors in the frame
+    y_offset = 30
+    for alert in alerts:
+        cv2.putText(frame, alert, (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        y_offset += 30
+
     cv2.imshow('Frame', frame)
     key = cv2.waitKey(1) & 0xFF
     if key == ord('q'):
@@ -314,7 +390,8 @@ while True:
 # Plot color transitions
 plt.figure()
 for color_name, transitions in color_transitions.items():
-    plt.plot(transitions, label=color_name)
+    if transitions:  # Only plot if there's data
+        plt.plot(list(transitions), label=color_name)
 plt.xlabel('Time')
 plt.ylabel('Normalized Color Count')
 plt.title('Color Transitions Over Time')
